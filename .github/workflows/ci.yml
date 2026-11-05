@@ -36,3 +36,51 @@ jobs:
             --output "$RUNNER_TEMP/gitleaks.tar.gz"
           sudo tar xz -f "$RUNNER_TEMP/gitleaks.tar.gz" -C /usr/local/bin gitleaks
       - run: gitleaks git -v --no-banner --redact .
+
+  revue-ia:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [qualite, secrets]
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Vérifier la présence de COPILOT_PAT
+        id: copilot
+        env:
+          COPILOT_PAT: ${{ secrets.COPILOT_PAT }}
+        run: |
+          if [ -n "$COPILOT_PAT" ]; then
+            echo "disponible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "revue IA sautée"
+          fi
+      - uses: actions/checkout@v7.0.1
+        if: steps.copilot.outputs.disponible == 'true'
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        if: steps.copilot.outputs.disponible == 'true'
+        with:
+          node-version: '24'
+      - name: Installer Copilot
+        if: steps.copilot.outputs.disponible == 'true'
+        run: npm install -g @github/copilot
+      - name: Écrire le diff de la pull request
+        if: steps.copilot.outputs.disponible == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git diff "$BASE_SHA...$HEAD_SHA" -- . ':(exclude)package-lock.json' > pr.diff
+      - name: Relire la pull request
+        if: steps.copilot.outputs.disponible == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+        run: copilot -p "Relis la pull request dont le diff est dans pr.diff, selon ta consigne." --agent relecteur-pr -s --no-ask-user --allow-all-tools --deny-tool=write --deny-tool=shell --max-ai-credits 30 > revue.md
+      - name: Publier la revue
+        if: steps.copilot.outputs.disponible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR_NUMBER" --body-file revue.md
