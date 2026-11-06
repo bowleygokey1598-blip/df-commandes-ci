@@ -48,3 +48,61 @@ jobs:
 
       - name: Analyser les secrets
         run: gitleaks git -v --no-banner --redact .
+
+  revue-ia:
+    if: github.event_name == 'pull_request'
+    needs: [qualite, secrets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Verifier le secret COPILOT_PAT
+        id: copilot-pat
+        env:
+          COPILOT_PAT: ${{ secrets.COPILOT_PAT }}
+        run: |
+          if [ -z "$COPILOT_PAT" ]; then
+            echo "revue IA sautée"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout complet
+        if: steps.copilot-pat.outputs.available == 'true'
+        uses: actions/checkout@v4 # Versions : https://github.com/actions/checkout/releases
+        with:
+          fetch-depth: 0
+
+      - name: Configurer Node.js
+        if: steps.copilot-pat.outputs.available == 'true'
+        uses: actions/setup-node@v4 # Versions : https://github.com/actions/setup-node/releases
+        with:
+          node-version: 24
+
+      - name: Installer GitHub Copilot CLI
+        if: steps.copilot-pat.outputs.available == 'true'
+        run: npm install -g @github/copilot
+
+      - name: Generer le diff de la pull request
+        if: steps.copilot-pat.outputs.available == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git switch -c "$PR_HEAD_REF" "$HEAD_SHA"
+          git diff "$BASE_SHA...$HEAD_SHA" -- . ':(exclude,glob)**/package-lock.json' > pr.diff
+
+      - name: Relire la pull request
+        if: steps.copilot-pat.outputs.available == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+        run: copilot -p "Relis la pull request dont le diff est dans pr.diff, selon ta consigne." --agent relecteur-pr -s --no-ask-user --allow-all-tools --deny-tool=write --deny-tool=shell --max-ai-credits 30 > revue.md
+
+      - name: Publier la revue
+        if: steps.copilot-pat.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment --body-file revue.md
